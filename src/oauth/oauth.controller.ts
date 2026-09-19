@@ -5,6 +5,8 @@ import {
   Req,
   Res,
   BadRequestException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'crypto';
@@ -25,6 +27,9 @@ import {
   codeChallengeS256,
 } from './pkce';
 import { parseCookieHeader, serializeSessionCookie } from '../http/cookies';
+import { RateLimiter } from '../security/rate-limit';
+import { RATE_LIMITS, RATE_LIMIT_ERROR } from '../security/rate-limit-policy';
+import { SecurityEventService } from '../security/security-event.service';
 
 const SESSION_COOKIE = 'kisauth_session';
 const GENERIC_ERROR = 'We could not complete this authentication request.';
@@ -38,7 +43,24 @@ export class OAuthController {
     private readonly sessions: OAuthSessionStore,
     private readonly googleTokenExchange: GoogleTokenExchangeService,
     private readonly googleIdToken: GoogleIdTokenService,
+    private readonly rateLimiter: RateLimiter,
+    private readonly securityEvents: SecurityEventService,
   ) {}
+
+  private async enforceRateLimit(
+    req: FastifyRequest,
+    policy: { scope: string; limit: number; windowSeconds: number },
+  ): Promise<void> {
+    const result = await this.rateLimiter.check(
+      policy.scope,
+      req.ip,
+      policy.limit,
+      policy.windowSeconds,
+    );
+    if (!result.allowed) {
+      throw new HttpException(RATE_LIMIT_ERROR, HttpStatus.TOO_MANY_REQUESTS);
+    }
+  }
 
   @Get('authorize')
   async authorize(
@@ -46,8 +68,11 @@ export class OAuthController {
     @Query('redirect_uri') redirectUri: string,
     @Query('purpose') purpose: string,
     @Query('state') clientState: string,
+    @Req() req: FastifyRequest,
     @Res({ passthrough: true }) res: FastifyReply,
   ) {
+    await this.enforceRateLimit(req, RATE_LIMITS.AUTHORIZE);
+
     const client = await this.clients.findByClientId(clientId ?? '');
     if (
       !client ||
@@ -89,6 +114,8 @@ export class OAuthController {
     @Req() req: FastifyRequest,
     @Res({ passthrough: true }) res: FastifyReply,
   ) {
+    await this.enforceRateLimit(req, RATE_LIMITS.OAUTH_GOOGLE_START);
+
     const sessionId = parseCookieHeader(req.headers.cookie)[SESSION_COOKIE];
     const session = sessionId ? await this.sessions.get(sessionId) : null;
     if (!session || !sessionId) throw new BadRequestException(GENERIC_ERROR);
@@ -116,11 +143,47 @@ export class OAuthController {
   async callback(
     @Query('code') code: string,
     @Query('state') state: string,
+    @Query('error') error: string | undefined,
     @Req() req: FastifyRequest,
     @Res({ passthrough: true }) res: FastifyReply,
   ) {
+    await this.enforceRateLimit(req, RATE_LIMITS.OAUTH_GOOGLE_CALLBACK);
+
     const sessionId = parseCookieHeader(req.headers.cookie)[SESSION_COOKIE];
     const session = sessionId ? await this.sessions.get(sessionId) : null;
+
+    // The user declining Google's consent screen is a normal, expected
+    // outcome — not a technical failure. Google still sends its own
+    // `state`, which we DO still check against the session, so this
+    // can't be used to spray a redirect at an attacker-chosen target;
+    // the redirect_uri always comes from OUR stored session, never from
+    // the request. Surfaced as a distinct `error=access_denied` on the
+    // client's own redirect_uri (standard OAuth convention) rather than
+    // GENERIC_ERROR, so the app can show "you cancelled" instead of a
+    // scary technical message.
+    if (error) {
+      if (session && state === session.state) {
+        await this.sessions.delete(sessionId!);
+        void this.securityEvents.emit({
+          eventType: 'oauth.cancelled',
+          outcome: 'failure',
+          clientId: session.clientId,
+          reason: error,
+          ip: req.ip,
+        });
+        const target = new URL(session.redirectUri);
+        target.searchParams.set(
+          'error',
+          error === 'access_denied' ? 'access_denied' : 'authentication_failed',
+        );
+        target.searchParams.set('state', session.clientState);
+        return res.redirect(target.toString(), 303);
+      }
+      // No valid session to redirect through safely — same generic
+      // response as every other "can't proceed" case.
+      throw new BadRequestException(GENERIC_ERROR);
+    }
+
     if (
       !session ||
       !code ||
@@ -139,9 +202,16 @@ export class OAuthController {
       );
       googleIdentity = await this.googleIdToken.verify(idToken, session.nonce);
     } catch (err) {
-      if (err instanceof GoogleIdTokenVerificationError) {
-        throw new BadRequestException(GENERIC_ERROR);
-      }
+      void this.securityEvents.emit({
+        eventType: 'oauth.callback_failed',
+        outcome: 'failure',
+        clientId: session.clientId,
+        reason:
+          err instanceof GoogleIdTokenVerificationError
+            ? 'id_token_verification_failed'
+            : 'token_exchange_failed',
+        ip: req.ip,
+      });
       throw new BadRequestException(GENERIC_ERROR);
     }
 
@@ -154,10 +224,24 @@ export class OAuthController {
       // renders this as its own screen; the backend contract is just
       // "not linked yet" plus enough context to start that flow.
       await this.sessions.delete(sessionId!);
+      void this.securityEvents.emit({
+        eventType: 'oauth.identity_not_linked',
+        outcome: 'failure',
+        clientId: session.clientId,
+        ip: req.ip,
+      });
       return { status: 'not_linked', providerSubject: googleIdentity.sub };
     }
 
     await this.identities.touchLastAuthenticated(identity.id);
+    void this.securityEvents.emit({
+      eventType: 'oauth.callback_succeeded',
+      outcome: 'success',
+      kisUserId: identity.kisUserId,
+      clientId: session.clientId,
+      ip: req.ip,
+      metadata: { purpose: session.purpose },
+    });
 
     const challengeId = randomUUID();
     await this.challenges.createChallenge(

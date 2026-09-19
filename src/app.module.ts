@@ -13,6 +13,8 @@ import { OAuthController } from './oauth/oauth.controller';
 import { AuthorizationJwtService } from './jwt/authorization-jwt.service';
 import { JwksController } from './jwt/jwks.controller';
 import { ExchangeController } from './exchange/exchange.controller';
+import { RateLimiter } from './security/rate-limit';
+import { SecurityEventService } from './security/security-event.service';
 
 const POOL_PROVIDER = {
   provide: Pool,
@@ -41,6 +43,8 @@ const REDIS_PROVIDER = {
     GoogleTokenExchangeService,
     GoogleIdTokenService,
     AuthorizationJwtService,
+    RateLimiter,
+    SecurityEventService,
   ],
 })
 export class AppModule {}
