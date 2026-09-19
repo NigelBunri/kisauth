@@ -21,4 +21,4 @@ RUN groupadd -r kisauth && useradd -r -g kisauth kisauth
 USER kisauth
 
 EXPOSE 4100
-CMD ["node", "dist/main.js"]
+CMD ["node", "dist/src/main.js"]

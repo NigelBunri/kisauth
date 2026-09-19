@@ -9,7 +9,7 @@
     "build": "nest build",
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/src/main",
     "migrate": "ts-node -r tsconfig-paths/register src/db/migrate.ts",
     "typecheck": "tsc --noEmit --pretty false --incremental false",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
