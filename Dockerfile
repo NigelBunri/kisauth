@@ -16,6 +16,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --prod --frozen-lockfile
 COPY --from=builder /app/dist ./dist
+COPY public ./public
 
 RUN groupadd -r kisauth && useradd -r -g kisauth kisauth
 USER kisauth

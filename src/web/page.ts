@@ -6,6 +6,8 @@
 // script-src relaxation — only style-src gets a narrow, deliberate
 // allowance (see main.ts) for the inline <style> block below.
 
+import { loadConfig } from '../config/env';
+
 export interface PageOptions {
   title: string;
   heading: string;
@@ -44,6 +46,13 @@ export function renderPage(opts: PageOptions): string {
     ? `<meta http-equiv="refresh" content="${delay};url=${escapeHtml(opts.returnTo.url)}">`
     : '';
 
+  // Absolute URLs — required for og:image/twitter:image (a relative path
+  // is silently ignored by link-preview crawlers, which don't resolve
+  // against the page they fetched it from the way a browser does).
+  const siteUrl = loadConfig().baseUrl.replace(/\/$/, '');
+  const ogImage = `${siteUrl}/brand/og-image.jpg`;
+  const pageUrl = `${siteUrl}/status`;
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -52,6 +61,19 @@ export function renderPage(opts: PageOptions): string {
 <meta name="robots" content="noindex, nofollow">
 ${refreshMeta}
 <title>${escapeHtml(opts.title)} · KIS Auth</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/brand/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/brand/icon-180.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/brand/icon-512.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="KIS Auth">
+<meta property="og:title" content="${escapeHtml(opts.heading)}">
+<meta property="og:description" content="${escapeHtml(opts.message)}">
+<meta property="og:image" content="${ogImage}">
+<meta property="og:url" content="${pageUrl}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="${escapeHtml(opts.heading)}">
+<meta name="twitter:description" content="${escapeHtml(opts.message)}">
+<meta name="twitter:image" content="${ogImage}">
 <style>
   :root {
     --bg: #12100b;
@@ -86,12 +108,21 @@ ${refreshMeta}
     text-align: center;
   }
   .brand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
     font-size: 0.72rem;
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--gold);
     font-weight: 600;
     margin-bottom: 1.5rem;
+  }
+  .brand img {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
   }
   .icon {
     display: inline-flex;
@@ -141,7 +172,7 @@ ${refreshMeta}
 </head>
 <body>
   <main class="card" role="main">
-    <div class="brand">KIS Auth</div>
+    <div class="brand"><img src="/brand/icon-180.png" alt="" width="22" height="22">KIS Auth</div>
     <div class="icon ${opts.tone}">${ICONS[opts.tone]}</div>
     <h1>${escapeHtml(opts.heading)}</h1>
     <p class="message">${escapeHtml(opts.message)}</p>

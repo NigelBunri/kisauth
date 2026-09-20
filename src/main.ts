@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { join } from 'path';
 import { NestFactory } from '@nestjs/core';
 import {
   FastifyAdapter,
@@ -6,6 +7,7 @@ import {
 } from '@nestjs/platform-fastify';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyCors from '@fastify/cors';
+import fastifyStatic from '@fastify/static';
 import { AppModule } from './app.module';
 import { loadConfig } from './config/env';
 
@@ -40,6 +42,14 @@ async function bootstrap() {
   });
   await app.register(fastifyCors, {
     origin: false, // this is a server-rendered + service-to-service surface, not a browser-JS API — no cross-origin fetch access needed
+  });
+  // Brand assets (favicon, og:image) for the web/ module's pages —
+  // committed into the image at build time (Dockerfile COPYs public/),
+  // not user content, so a plain static mount is all this needs.
+  await app.register(fastifyStatic, {
+    root: join(process.cwd(), 'public'),
+    prefix: '/',
+    decorateReply: false,
   });
 
   await app.listen(config.port, '0.0.0.0');
