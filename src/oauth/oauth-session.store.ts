@@ -14,6 +14,11 @@ export interface OAuthSession {
   nonce: string;
   clientState: string; // the caller's own opaque state, echoed back on redirect
   codeVerifier?: string; // PKCE verifier — set once /oauth/google/start runs; never leaves the server
+  // Set only when purpose='link', from a verified+consumed link ticket at
+  // /authorize time. Baked into the session server-side so nothing later
+  // in the flow (including the browser) can influence which KIS account
+  // gets linked — see LinkTicketService for how this is minted/verified.
+  linkKisUserId?: string;
 }
 
 /** Server-side storage for the in-flight browser OAuth request, referenced

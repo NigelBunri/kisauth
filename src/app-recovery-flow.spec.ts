@@ -117,6 +117,14 @@ describeIfInfra('KIS Auth — full recovery round trip (integration)', () => {
     if (app) await app.close();
   });
 
+  // The callback always redirects to kis-auth's own /status page first;
+  // the real client-bound target (carrying the actual code) is in its
+  // client_redirect param.
+  function clientRedirectFrom(callbackRes: supertest.Response): URL {
+    const statusRedirect = new URL(callbackRes.headers.location);
+    return new URL(statusRedirect.searchParams.get('client_redirect')!);
+  }
+
   function extractCookie(res: supertest.Response): string {
     const raw = res.headers['set-cookie'];
     const cookieHeader = Array.isArray(raw) ? raw[0] : raw;
@@ -156,7 +164,17 @@ describeIfInfra('KIS Auth — full recovery round trip (integration)', () => {
       .set('Cookie', cookie)
       .redirects(0);
     expect(callbackRes.status).toBe(303);
-    const finalRedirect = new URL(callbackRes.headers.location);
+    // The callback redirects to kis-auth's own /status page first (a
+    // clear "what happened" screen, since Linking.openURL on the mobile
+    // side is a full browser navigation, not a fetch) — the actual
+    // client-bound target is carried in its client_redirect param and
+    // auto-followed from there.
+    const statusRedirect = new URL(callbackRes.headers.location);
+    expect(statusRedirect.pathname).toBe('/status');
+    expect(statusRedirect.searchParams.get('state')).toBe('recovery_success');
+    const finalRedirect = new URL(
+      statusRedirect.searchParams.get('client_redirect')!,
+    );
     expect(finalRedirect.origin + finalRedirect.pathname).toBe(REDIRECT_URI);
     expect(finalRedirect.searchParams.get('state')).toBe(
       'client-own-csrf-state',
@@ -217,9 +235,7 @@ describeIfInfra('KIS Auth — full recovery round trip (integration)', () => {
       .query({ code: 'g-code-2', state })
       .set('Cookie', cookie)
       .redirects(0);
-    const code = new URL(callbackRes.headers.location).searchParams.get(
-      'code',
-    )!;
+    const code = clientRedirectFrom(callbackRes).searchParams.get('code')!;
 
     const body = { code, client_id: 'kis-django', redirect_uri: REDIRECT_URI };
     const headers1 = signedInternalHeaders({
@@ -299,9 +315,7 @@ describeIfInfra('KIS Auth — full recovery round trip (integration)', () => {
       .query({ code: 'g-code-3', state })
       .set('Cookie', cookie)
       .redirects(0);
-    const code = new URL(callbackRes.headers.location).searchParams.get(
-      'code',
-    )!;
+    const code = clientRedirectFrom(callbackRes).searchParams.get('code')!;
 
     // Attempt to redeem it against a DIFFERENT redirect_uri than was approved.
     const body = {

@@ -6,9 +6,10 @@ import Redis from 'ioredis';
 // Redis instance with other infrastructure without key collisions.
 const KEY_PREFIX = 'kisauth:challenge:';
 const CODE_PREFIX = 'kisauth:code:';
+const REG_TICKET_PREFIX = 'kisauth:regticket:';
 
 export type Purpose =
-  'recovery' | 'registration' | 'device_verify' | 'sensitive_change';
+  'recovery' | 'registration' | 'link' | 'device_verify' | 'sensitive_change';
 
 export interface ChallengeRecord {
   purpose: Purpose;
@@ -25,6 +26,20 @@ export interface AuthorizationCodePayload {
   clientId: string;
   kisUserId: string;
   authIdentityId: string;
+  redirectUri: string;
+}
+
+/** Issued when purpose='registration' and no existing identity matched —
+ * there is deliberately no kisUserId here, since none exists yet. Carries
+ * just enough of the Google-verified identity for Django to create the
+ * account and then link it, without kis-auth ever holding KIS account
+ * fields (phone, etc.) itself. */
+export interface RegistrationTicketPayload {
+  clientId: string;
+  provider: string;
+  providerSubject: string;
+  providerEmail: string | null;
+  providerEmailVerified: boolean;
   redirectUri: string;
 }
 
@@ -121,5 +136,34 @@ export class ChallengeStore {
       CODE_PREFIX + code,
     )) as string | null;
     return raw ? (JSON.parse(raw) as AuthorizationCodePayload) : null;
+  }
+
+  /** Same single-use CSPRNG-code pattern as issueAuthorizationCode, for the
+   * registration branch — kept as a distinct method/prefix rather than
+   * overloading AuthorizationCodePayload, since callers of the existing
+   * type correctly assume kisUserId is always present. */
+  async issueRegistrationTicket(
+    payload: RegistrationTicketPayload,
+    ttlSeconds: number,
+  ): Promise<string> {
+    const code = randomBytes(32).toString('base64url');
+    await this.redis.set(
+      REG_TICKET_PREFIX + code,
+      JSON.stringify(payload),
+      'EX',
+      ttlSeconds,
+    );
+    return code;
+  }
+
+  async consumeRegistrationTicket(
+    code: string,
+  ): Promise<RegistrationTicketPayload | null> {
+    const raw = (await this.redis.eval(
+      CONSUME_SCRIPT,
+      1,
+      REG_TICKET_PREFIX + code,
+    )) as string | null;
+    return raw ? (JSON.parse(raw) as RegistrationTicketPayload) : null;
   }
 }

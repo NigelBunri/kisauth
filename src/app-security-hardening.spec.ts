@@ -158,9 +158,13 @@ describeIfInfra(
         .query({ code: 'google-code', state: googleState })
         .set('Cookie', cookie)
         .redirects(0);
-      const code = new URL(callbackRes.headers.location).searchParams.get(
-        'code',
-      )!;
+      // The callback redirects to /status first; the real client target
+      // (carrying the actual code) is in its client_redirect param.
+      const statusRedirect = new URL(callbackRes.headers.location);
+      const clientTarget = new URL(
+        statusRedirect.searchParams.get('client_redirect')!,
+      );
+      const code = clientTarget.searchParams.get('code')!;
       return { code };
     }
 
@@ -459,7 +463,11 @@ describeIfInfra(
         // the property that actually matters.
         const code =
           callbackRes.status === 303
-            ? new URL(callbackRes.headers.location).searchParams.get('code')
+            ? new URL(
+                new URL(callbackRes.headers.location).searchParams.get(
+                  'client_redirect',
+                ) ?? 'http://invalid.local',
+              ).searchParams.get('code')
             : null;
         if (code) {
           const body = {
@@ -516,7 +524,10 @@ describeIfInfra(
           .redirects(0);
 
         expect(res.status).toBe(303);
-        const target = new URL(res.headers.location);
+        const statusRedirect = new URL(res.headers.location);
+        expect(statusRedirect.pathname).toBe('/status');
+        expect(statusRedirect.searchParams.get('state')).toBe('cancelled');
+        const target = new URL(statusRedirect.searchParams.get('client_redirect')!);
         expect(target.origin + target.pathname).toBe(REDIRECT_URI);
         expect(target.searchParams.get('error')).toBe('access_denied');
         expect(target.searchParams.get('state')).toBe('cancel-test');

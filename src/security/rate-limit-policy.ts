@@ -41,6 +41,20 @@ export const RATE_LIMITS = {
     windowSeconds: 60,
   },
   EXCHANGE_PER_IP: { scope: 'exchange_ip', limit: 60, windowSeconds: 60 },
+
+  // Same shape as the recovery exchange limits, but tighter — new-account
+  // creation is inherently lower-volume than recovery traffic, so a burst
+  // here is more suspicious sooner.
+  REGISTRATION_EXCHANGE_PER_CLIENT: {
+    scope: 'registration_exchange_client',
+    limit: 60,
+    windowSeconds: 60,
+  },
+  REGISTRATION_EXCHANGE_PER_IP: {
+    scope: 'registration_exchange_ip',
+    limit: 30,
+    windowSeconds: 60,
+  },
 } as const;
 
 export const RATE_LIMIT_ERROR = 'Too many requests. Please try again shortly.';

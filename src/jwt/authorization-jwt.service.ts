@@ -8,10 +8,14 @@ import type { Purpose } from '../redis/challenge-store';
 export const ISSUER_BASE = 'kisauth.kingdomimpactventures.org';
 
 export interface AuthorizationClaims {
-  sub: string; // kis_user_id
+  // Absent only for purpose='registration' — no kis_user_id exists yet at
+  // the point this token is issued; Django creates the account from
+  // providerSubject/providerEmail below, then links it as a separate step.
+  sub?: string; // kis_user_id
   aud: string; // client_id, e.g. "kis-django"
   purpose: Purpose;
-  authIdentityId: string;
+  authIdentityId?: string; // absent for purpose='registration'
+  providerSubject?: string; // present only for purpose='registration'
   providerEmail: string | null;
   providerEmailVerified: boolean;
 }
@@ -33,20 +37,21 @@ export class AuthorizationJwtService {
       'RS256',
     );
     const now = Math.floor(Date.now() / 1000);
-    return new SignJWT({
+    const builder = new SignJWT({
       purpose: claims.purpose,
-      auth_identity_id: claims.authIdentityId,
+      auth_identity_id: claims.authIdentityId ?? null,
+      provider_subject: claims.providerSubject ?? null,
       provider_email: claims.providerEmail,
       provider_email_verified: claims.providerEmailVerified,
     })
       .setProtectedHeader({ alg: 'RS256', kid: config.jwtKid })
       .setIssuer(ISSUER_BASE)
       .setAudience(claims.aud)
-      .setSubject(claims.sub)
       .setIssuedAt(now)
       .setExpirationTime(now + expiresInSeconds)
-      .setJti(randomUUID())
-      .sign(privateKey);
+      .setJti(randomUUID());
+    if (claims.sub) builder.setSubject(claims.sub);
+    return builder.sign(privateKey);
   }
 
   /** Builds the current JWKS document — current key plus any keys kept

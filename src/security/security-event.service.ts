@@ -9,7 +9,14 @@ export type SecurityEventType =
   | 'oauth.identity_not_linked'
   | 'oauth.cancelled'
   | 'exchange.succeeded'
-  | 'exchange.failed';
+  | 'exchange.failed'
+  | 'link.succeeded'
+  | 'link.failed'
+  | 'link.already_linked'
+  | 'registration.ticket_issued'
+  | 'registration.already_registered'
+  | 'registration.exchange_succeeded'
+  | 'registration.exchange_failed';
 
 export interface SecurityEvent {
   eventType: SecurityEventType;
