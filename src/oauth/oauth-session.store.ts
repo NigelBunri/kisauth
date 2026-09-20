@@ -19,6 +19,12 @@ export interface OAuthSession {
   // in the flow (including the browser) can influence which KIS account
   // gets linked — see LinkTicketService for how this is minted/verified.
   linkKisUserId?: string;
+  // Set only for the enterprise OIDC bridge, from /authorize's own
+  // `partner_slug` query param — baked into the session server-side so
+  // /oauth/enterprise/:partnerSlug/start and .../callback can confirm the
+  // path param actually matches what /authorize approved, rather than
+  // trusting the URL alone.
+  partnerSlug?: string;
 }
 
 /** Server-side storage for the in-flight browser OAuth request, referenced

@@ -18,6 +18,12 @@ export interface AuthorizationClaims {
   providerSubject?: string; // present only for purpose='registration'
   providerEmail: string | null;
   providerEmailVerified: boolean;
+  // Present only on registration-purpose tokens. Django's
+  // VerifiedRegistration defaults provider to "google" and partnerSlug to
+  // null when absent, so the original Google flow's tokens (which never
+  // set these) keep decoding exactly as before.
+  provider?: string;
+  partnerSlug?: string;
 }
 
 @Injectable()
@@ -43,6 +49,8 @@ export class AuthorizationJwtService {
       provider_subject: claims.providerSubject ?? null,
       provider_email: claims.providerEmail,
       provider_email_verified: claims.providerEmailVerified,
+      ...(claims.provider ? { provider: claims.provider } : {}),
+      ...(claims.partnerSlug ? { partner_slug: claims.partnerSlug } : {}),
     })
       .setProtectedHeader({ alg: 'RS256', kid: config.jwtKid })
       .setIssuer(ISSUER_BASE)

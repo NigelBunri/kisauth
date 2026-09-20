@@ -1,26 +1,18 @@
 import { Injectable, Optional } from '@nestjs/common';
-import {
-  jwtVerify,
-  createRemoteJWKSet,
-  type JWTVerifyGetKey,
-  type JWTPayload,
-} from 'jose';
+import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
 import { loadConfig } from '../config/env';
+import {
+  verifyOidcIdToken,
+  IdTokenVerificationError,
+  type VerifiedIdToken,
+} from './id-token-verifier';
 
 const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'];
 
-export interface GoogleIdentity {
-  sub: string;
-  email: string | null;
-  emailVerified: boolean;
-}
+export type GoogleIdentity = VerifiedIdToken;
 
-export class GoogleIdTokenVerificationError extends Error {
-  constructor(public readonly reason: string) {
-    super(`google id_token verification failed: ${reason}`);
-  }
-}
+export class GoogleIdTokenVerificationError extends IdTokenVerificationError {}
 
 let remoteJwks: JWTVerifyGetKey | null = null;
 function getRemoteJwks(): JWTVerifyGetKey {
@@ -34,8 +26,9 @@ export class GoogleIdTokenService {
 
   /** keyResolver is injectable so tests can verify against a synthetic
    * keypair instead of real network calls to Google — the verification
-   * LOGIC below (issuer/audience/nonce/expiry/signature) is exactly what
-   * runs in production; only the key source differs.
+   * LOGIC below (issuer/audience/nonce/expiry/signature, now shared with
+   * every other IdP via id-token-verifier.ts) is exactly what runs in
+   * production; only the key source differs.
    *
    * @Optional() (not a JS default parameter) because Nest's DI container
    * calls the constructor itself, explicitly, for every resolvable
@@ -52,32 +45,20 @@ export class GoogleIdTokenService {
     expectedNonce: string,
   ): Promise<GoogleIdentity> {
     const config = loadConfig();
-    let payload: JWTPayload;
     try {
-      const result = await jwtVerify(idToken, this.keyResolver, {
+      return await verifyOidcIdToken({
+        idToken,
+        keyResolver: this.keyResolver,
         issuer: GOOGLE_ISSUERS,
         audience: config.googleClientId,
-        algorithms: ['RS256'],
+        expectedNonce,
       });
-      payload = result.payload;
-    } catch {
-      // Never leak *why* verification failed to a caller this deep — the
-      // controller turns every failure into the same generic external
-      // message regardless. The specific reason is for server logs only.
-      throw new GoogleIdTokenVerificationError('signature_or_claims_invalid');
+    } catch (err) {
+      throw new GoogleIdTokenVerificationError(
+        err instanceof IdTokenVerificationError
+          ? err.reason
+          : 'signature_or_claims_invalid',
+      );
     }
-
-    if (payload.nonce !== expectedNonce) {
-      throw new GoogleIdTokenVerificationError('nonce_mismatch');
-    }
-    if (typeof payload.sub !== 'string' || !payload.sub) {
-      throw new GoogleIdTokenVerificationError('missing_subject');
-    }
-
-    return {
-      sub: payload.sub,
-      email: typeof payload.email === 'string' ? payload.email : null,
-      emailVerified: payload.email_verified === true,
-    };
   }
 }

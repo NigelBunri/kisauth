@@ -16,7 +16,14 @@ export type SecurityEventType =
   | 'registration.ticket_issued'
   | 'registration.already_registered'
   | 'registration.exchange_succeeded'
-  | 'registration.exchange_failed';
+  | 'registration.exchange_failed'
+  // Enterprise OIDC bridge only — a failure resolving the tenant's SSO
+  // config from Django, or fetching/parsing its discovery document,
+  // before ever reaching the IdP itself. Every other enterprise-flow
+  // event reuses the existing oauth.*/link.*/registration.* types above
+  // (distinguished via metadata.provider/partner_slug) rather than
+  // forking a parallel event taxonomy per provider.
+  | 'oauth.enterprise_config_failed';
 
 export interface SecurityEvent {
   eventType: SecurityEventType;

@@ -10,6 +10,12 @@ import { OAuthSessionStore } from './oauth/oauth-session.store';
 import { GoogleTokenExchangeService } from './oauth/google-token-exchange.service';
 import { GoogleIdTokenService } from './oauth/google-id-token.service';
 import { OAuthController } from './oauth/oauth.controller';
+import { OAuthOutcomeService } from './oauth/oauth-outcome.service';
+import { OidcEnterpriseController } from './oauth/oidc-enterprise.controller';
+import { OidcProviderResolverService } from './oauth/oidc-provider-resolver.service';
+import { OidcDiscoveryService } from './oauth/oidc-discovery.service';
+import { OidcTokenExchangeService } from './oauth/oidc-token-exchange.service';
+import { OidcIdTokenService } from './oauth/oidc-id-token.service';
 import { AuthorizationJwtService } from './jwt/authorization-jwt.service';
 import { JwksController } from './jwt/jwks.controller';
 import { ExchangeController } from './exchange/exchange.controller';
@@ -34,6 +40,7 @@ const REDIS_PROVIDER = {
   controllers: [
     HealthController,
     OAuthController,
+    OidcEnterpriseController,
     JwksController,
     ExchangeController,
     RegistrationExchangeController,
@@ -49,6 +56,11 @@ const REDIS_PROVIDER = {
     OAuthSessionStore,
     GoogleTokenExchangeService,
     GoogleIdTokenService,
+    OAuthOutcomeService,
+    OidcProviderResolverService,
+    OidcDiscoveryService,
+    OidcTokenExchangeService,
+    OidcIdTokenService,
     AuthorizationJwtService,
     RateLimiter,
     SecurityEventService,

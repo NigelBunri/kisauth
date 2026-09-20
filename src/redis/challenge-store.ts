@@ -9,7 +9,16 @@ const CODE_PREFIX = 'kisauth:code:';
 const REG_TICKET_PREFIX = 'kisauth:regticket:';
 
 export type Purpose =
-  'recovery' | 'registration' | 'link' | 'device_verify' | 'sensitive_change';
+  | 'recovery'
+  | 'registration'
+  | 'link'
+  | 'device_verify'
+  | 'sensitive_change'
+  // Enterprise-IdP (Okta/Azure AD/Google Workspace/etc.) JIT registration
+  // via the generic OIDC bridge — see oidc-enterprise.controller.ts.
+  // Django's exchange_client.VerifiedRegistration treats this the same as
+  // 'registration' except it skips phone collection.
+  | 'enterprise_sso_registration';
 
 export interface ChallengeRecord {
   purpose: Purpose;
@@ -36,10 +45,17 @@ export interface AuthorizationCodePayload {
  * fields (phone, etc.) itself. */
 export interface RegistrationTicketPayload {
   clientId: string;
+  // Carried through so RegistrationExchangeController mints the JWT with
+  // the right `purpose` claim instead of hardcoding 'registration' — see
+  // Purpose above for 'enterprise_sso_registration'.
+  purpose: Purpose;
   provider: string;
   providerSubject: string;
   providerEmail: string | null;
   providerEmailVerified: boolean;
+  // Set only for enterprise_sso_registration — the tenant the IdP config
+  // belongs to. null for the original Google flow.
+  partnerSlug: string | null;
   redirectUri: string;
 }
 

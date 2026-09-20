@@ -113,10 +113,17 @@ export class RegistrationExchangeController {
     const token = await this.jwt.sign(
       {
         aud: payload.clientId,
-        purpose: 'registration',
+        // Was hardcoded to 'registration' — now carries whatever purpose
+        // the ticket was actually issued for, so the enterprise SSO JIT
+        // path's 'enterprise_sso_registration' ticket produces a JWT
+        // Django's VerifiedRegistration recognizes as such rather than
+        // being silently relabeled as an ordinary Google registration.
+        purpose: payload.purpose,
         providerSubject: payload.providerSubject,
         providerEmail: payload.providerEmail,
         providerEmailVerified: payload.providerEmailVerified,
+        provider: payload.provider,
+        ...(payload.partnerSlug ? { partnerSlug: payload.partnerSlug } : {}),
       },
       config.authCodeTtlSeconds,
     );

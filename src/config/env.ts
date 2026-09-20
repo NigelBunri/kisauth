@@ -23,6 +23,12 @@ export interface KisAuthConfig {
   internalSignatureMaxSkewSeconds: number;
 
   djangoSecurityEventUrl: string;
+  // Full URL of Django's GET /api/v1/kis-auth/sso-config/ endpoint
+  // (without the ?partner_slug=... query — OidcProviderResolverService
+  // appends that itself). Empty means enterprise SSO is simply
+  // unavailable — every lookup fails closed, the same posture as an
+  // unset HMAC secret.
+  djangoSsoConfigUrl: string;
 
   challengeTtlSeconds: number;
   authCodeTtlSeconds: number;
@@ -101,6 +107,7 @@ export function loadConfig(): KisAuthConfig {
     ),
 
     djangoSecurityEventUrl: optional('DJANGO_SECURITY_EVENT_URL', ''),
+    djangoSsoConfigUrl: optional('DJANGO_SSO_CONFIG_URL', ''),
 
     challengeTtlSeconds: int('KISAUTH_CHALLENGE_TTL_SECONDS', 30),
     authCodeTtlSeconds: int('KISAUTH_AUTH_CODE_TTL_SECONDS', 60),

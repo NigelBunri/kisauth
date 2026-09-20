@@ -55,6 +55,21 @@ export const RATE_LIMITS = {
     limit: 30,
     windowSeconds: 60,
   },
+
+  // Enterprise OIDC bridge — same tiers as the equivalent Google routes.
+  // /start additionally does a Django round trip (sso-config resolution)
+  // and a discovery-document fetch, both cached, so it's no more
+  // expensive per-request than Google's fixed-config start once warm.
+  OAUTH_ENTERPRISE_START: {
+    scope: 'oauth_enterprise_start',
+    limit: 30,
+    windowSeconds: 60,
+  },
+  OAUTH_ENTERPRISE_CALLBACK: {
+    scope: 'oauth_enterprise_callback',
+    limit: 10,
+    windowSeconds: 60,
+  },
 } as const;
 
 export const RATE_LIMIT_ERROR = 'Too many requests. Please try again shortly.';

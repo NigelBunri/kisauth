@@ -9,7 +9,6 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { randomUUID } from 'crypto';
 import { loadConfig } from '../config/env';
 import { ClientService } from '../clients/client.service';
 import { IdentityService } from '../identity/identity.service';
@@ -31,9 +30,18 @@ import { RateLimiter } from '../security/rate-limit';
 import { RATE_LIMITS, RATE_LIMIT_ERROR } from '../security/rate-limit-policy';
 import { SecurityEventService } from '../security/security-event.service';
 import { LinkTicketService } from '../security/link-ticket';
+import { OAuthOutcomeService } from './oauth-outcome.service';
+import { statusRedirectUrl } from './status-redirect';
 
 const SESSION_COOKIE = 'kisauth_session';
 const GENERIC_ERROR = 'We could not complete this authentication request.';
+
+// Same shape as a client_id/redirect_uri — loose enough for a real slug
+// (letters, digits, hyphens), tight enough that it can never smuggle a
+// path segment, query string, or anything else into the redirect this
+// value later drives (/oauth/enterprise/<slug>/start). Existence/config
+// validity is checked separately, against Django, in that route.
+const PARTNER_SLUG_PATTERN = /^[a-z0-9-]{1,64}$/;
 
 @Controller()
 export class OAuthController {
@@ -47,22 +55,8 @@ export class OAuthController {
     private readonly rateLimiter: RateLimiter,
     private readonly securityEvents: SecurityEventService,
     private readonly linkTickets: LinkTicketService,
+    private readonly outcome: OAuthOutcomeService,
   ) {}
-
-  /** Every terminal outcome (success or failure) routes through kis-auth's
-   * own /status page rather than redirecting straight to the client's
-   * redirect_uri — this is what lets the user see a clear "what just
-   * happened" message instead of either a raw JSON blob or a silent
-   * hand-off to a universal link that may not be verified on their
-   * device. The page itself auto-refreshes to clientTarget (already
-   * carrying code/error+state) after a couple seconds, with a manual
-   * button as the fallback that never depends on JavaScript. */
-  private statusRedirectUrl(state: string, clientTarget: string): string {
-    const url = new URL('/status', loadConfig().baseUrl);
-    url.searchParams.set('state', state);
-    url.searchParams.set('client_redirect', clientTarget);
-    return url.toString();
-  }
 
   private async enforceRateLimit(
     req: FastifyRequest,
@@ -86,6 +80,12 @@ export class OAuthController {
     @Query('purpose') purpose: string,
     @Query('state') clientState: string,
     @Query('link_ticket') linkTicket: string | undefined,
+    // Enterprise OIDC bridge entry point: when present, this is a login
+    // against a specific tenant's IdP rather than Google, and /authorize
+    // redirects into /oauth/enterprise/:partnerSlug/start instead of
+    // /oauth/google/start once every check below (client/redirect_uri/
+    // purpose/link_ticket) has passed — identically to the Google path.
+    @Query('partner_slug') partnerSlug: string | undefined,
     @Req() req: FastifyRequest,
     @Res({ passthrough: true }) res: FastifyReply,
   ) {
@@ -107,13 +107,16 @@ export class OAuthController {
     if (!clientState) {
       throw new BadRequestException(GENERIC_ERROR);
     }
+    if (partnerSlug !== undefined && !PARTNER_SLUG_PATTERN.test(partnerSlug)) {
+      throw new BadRequestException(GENERIC_ERROR);
+    }
 
     // purpose='link' requires proof — minted by Django, for an already-
     // authenticated KIS user — that THIS KIS account is the one being
     // linked. Without this, an unauthenticated caller could pass an
-    // arbitrary kis_user_id and link their own Google identity to
-    // someone else's account. See LinkTicketService for the single-use
-    // + expiry guarantees.
+    // arbitrary kis_user_id and link their own identity to someone else's
+    // account. See LinkTicketService for the single-use + expiry
+    // guarantees.
     let linkKisUserId: string | undefined;
     if (purpose === 'link') {
       if (!linkTicket) {
@@ -145,6 +148,7 @@ export class OAuthController {
       nonce: generateNonce(),
       clientState,
       ...(linkKisUserId ? { linkKisUserId } : {}),
+      ...(partnerSlug ? { partnerSlug } : {}),
     });
 
     res.header(
@@ -154,7 +158,12 @@ export class OAuthController {
         maxAgeSeconds: 600,
       }),
     );
-    return res.redirect('/oauth/google/start', 303);
+    return res.redirect(
+      partnerSlug
+        ? `/oauth/enterprise/${encodeURIComponent(partnerSlug)}/start`
+        : '/oauth/google/start',
+      303,
+    );
   }
 
   @Get('oauth/google/start')
@@ -226,7 +235,7 @@ export class OAuthController {
         );
         target.searchParams.set('state', session.clientState);
         return res.redirect(
-          this.statusRedirectUrl('cancelled', target.toString()),
+          statusRedirectUrl('cancelled', target.toString()),
           303,
         );
       }
@@ -268,7 +277,7 @@ export class OAuthController {
       target.searchParams.set('error', 'authentication_failed');
       target.searchParams.set('state', session.clientState);
       return res.redirect(
-        this.statusRedirectUrl('invalid_request', target.toString()),
+        statusRedirectUrl('invalid_request', target.toString()),
         303,
       );
     }
@@ -278,7 +287,14 @@ export class OAuthController {
     // constraints ARE the "already linked" check, surfaced as a typed
     // result rather than raced against with a separate SELECT.
     if (session.purpose === 'link') {
-      return this.handleLinkCallback(googleIdentity, session, sessionId!, req, res);
+      return this.outcome.finalizeLink({
+        provider: 'google',
+        verifiedIdentity: googleIdentity,
+        session,
+        sessionId: sessionId!,
+        req,
+        res,
+      });
     }
 
     const identity = await this.identities.findByProviderSubject(
@@ -287,266 +303,27 @@ export class OAuthController {
     );
 
     if (session.purpose === 'registration') {
-      return this.handleRegistrationCallback(
-        googleIdentity,
+      return this.outcome.finalizeRegistration({
+        provider: 'google',
+        verifiedIdentity: googleIdentity,
         identity,
         session,
-        sessionId!,
+        sessionId: sessionId!,
         req,
         res,
-      );
+        registrationPurpose: 'registration',
+      });
     }
 
     // Everything below is the original recovery behavior — unchanged.
-    if (!identity) {
-      // Explicit link-or-create — never silently linked. Routed through
-      // /status rather than returned as raw JSON: Linking.openURL (the
-      // mobile app's entry mechanism) is a full browser navigation, not
-      // a fetch — a bare JSON body would just render as unstyled text
-      // with no way back into the app.
-      await this.sessions.delete(sessionId!);
-      void this.securityEvents.emit({
-        eventType: 'oauth.identity_not_linked',
-        outcome: 'failure',
-        clientId: session.clientId,
-        ip: req.ip,
-      });
-      const target = new URL(session.redirectUri);
-      target.searchParams.set('error', 'not_linked');
-      target.searchParams.set('provider_subject', googleIdentity.sub);
-      target.searchParams.set('state', session.clientState);
-      return res.redirect(
-        this.statusRedirectUrl('not_linked', target.toString()),
-        303,
-      );
-    }
-
-    await this.identities.touchLastAuthenticated(identity.id);
-    void this.securityEvents.emit({
-      eventType: 'oauth.callback_succeeded',
-      outcome: 'success',
-      kisUserId: identity.kisUserId,
-      clientId: session.clientId,
-      ip: req.ip,
-      metadata: { purpose: session.purpose },
-    });
-
-    const challengeId = randomUUID();
-    await this.challenges.createChallenge(
-      challengeId,
-      {
-        purpose: session.purpose,
-        clientId: session.clientId,
-        kisUserId: identity.kisUserId,
-        authIdentityId: identity.id,
-        attemptCount: 0,
-        maxAttempts: loadConfig().challengeMaxAttempts,
-        used: false,
-      },
-      loadConfig().challengeTtlSeconds,
-    );
-
-    await this.sessions.delete(sessionId!);
-
-    // Phase B ships without a manual fallback code (Phase 2 open question
-    // #2) — Google-authenticated proof is already the primary mechanism,
-    // so the challenge is confirmed immediately rather than making the
-    // user additionally copy a 6-digit code. The challenge_id is still
-    // minted and attempt-tracked so the confirm step below stays a real,
-    // independently testable seam rather than being inlined away.
-    return this.confirmInternal(
-      challengeId,
-      session.redirectUri,
-      session.clientState,
-      res,
-      'recovery_success',
-    );
-  }
-
-  /** purpose='link': attach googleIdentity to session.linkKisUserId (set
-   * at /authorize from a Django-signed, already-consumed link ticket —
-   * never trusted from this request). On success, issues a normal
-   * authorization code through the exact same challenge/confirm path
-   * recovery uses, so Django's existing exchange endpoint needs no
-   * changes to redeem it. */
-  private async handleLinkCallback(
-    googleIdentity: { sub: string; email: string | null; emailVerified: boolean },
-    session: NonNullable<Awaited<ReturnType<OAuthSessionStore['get']>>>,
-    sessionId: string,
-    req: FastifyRequest,
-    res: FastifyReply,
-  ) {
-    const kisUserId = session.linkKisUserId;
-    if (!kisUserId) {
-      // Should be unreachable — /authorize refuses to create a
-      // purpose='link' session without a verified ticket. Fail closed.
-      await this.sessions.delete(sessionId);
-      throw new BadRequestException(GENERIC_ERROR);
-    }
-
-    const result = await this.identities.link({
+    return this.outcome.finalizeReturningUser({
       provider: 'google',
       providerSubject: googleIdentity.sub,
-      kisUserId,
-      providerEmail: googleIdentity.email,
-      providerEmailVerified: googleIdentity.emailVerified,
-    });
-
-    await this.sessions.delete(sessionId);
-
-    if (!result.ok) {
-      void this.securityEvents.emit({
-        eventType: 'link.already_linked',
-        outcome: 'failure',
-        kisUserId,
-        clientId: session.clientId,
-        ip: req.ip,
-      });
-      const target = new URL(session.redirectUri);
-      target.searchParams.set('error', 'already_linked');
-      target.searchParams.set('state', session.clientState);
-      return res.redirect(
-        this.statusRedirectUrl('already_linked', target.toString()),
-        303,
-      );
-    }
-
-    void this.securityEvents.emit({
-      eventType: 'link.succeeded',
-      outcome: 'success',
-      kisUserId,
-      clientId: session.clientId,
-      ip: req.ip,
-    });
-
-    const challengeId = randomUUID();
-    await this.challenges.createChallenge(
-      challengeId,
-      {
-        purpose: 'link',
-        clientId: session.clientId,
-        kisUserId,
-        authIdentityId: result.identity.id,
-        attemptCount: 0,
-        maxAttempts: loadConfig().challengeMaxAttempts,
-        used: false,
-      },
-      loadConfig().challengeTtlSeconds,
-    );
-
-    return this.confirmInternal(
-      challengeId,
-      session.redirectUri,
-      session.clientState,
+      identity,
+      session,
+      sessionId: sessionId!,
+      req,
       res,
-      'success',
-    );
-  }
-
-  /** purpose='registration': an existing identity match means this Google
-   * account is already registered — redirect with a distinct error so the
-   * app can offer sign-in/recovery instead of silently creating a second
-   * account. No match is the expected success case: issue a short-lived
-   * registration ticket (no kis_user_id exists yet) for Django to redeem
-   * via the separate /internal/v1/registration/exchange endpoint. */
-  private async handleRegistrationCallback(
-    googleIdentity: { sub: string; email: string | null; emailVerified: boolean },
-    identity: { kisUserId: string } | null,
-    session: NonNullable<Awaited<ReturnType<OAuthSessionStore['get']>>>,
-    sessionId: string,
-    req: FastifyRequest,
-    res: FastifyReply,
-  ) {
-    await this.sessions.delete(sessionId);
-
-    if (identity) {
-      void this.securityEvents.emit({
-        eventType: 'registration.already_registered',
-        outcome: 'failure',
-        kisUserId: identity.kisUserId,
-        clientId: session.clientId,
-        ip: req.ip,
-      });
-      const target = new URL(session.redirectUri);
-      target.searchParams.set('error', 'already_registered');
-      target.searchParams.set('state', session.clientState);
-      return res.redirect(
-        this.statusRedirectUrl('already_registered', target.toString()),
-        303,
-      );
-    }
-
-    const ticket = await this.challenges.issueRegistrationTicket(
-      {
-        clientId: session.clientId,
-        provider: 'google',
-        providerSubject: googleIdentity.sub,
-        providerEmail: googleIdentity.email,
-        providerEmailVerified: googleIdentity.emailVerified,
-        redirectUri: session.redirectUri,
-      },
-      loadConfig().authCodeTtlSeconds,
-    );
-
-    void this.securityEvents.emit({
-      eventType: 'registration.ticket_issued',
-      outcome: 'success',
-      clientId: session.clientId,
-      ip: req.ip,
     });
-
-    const target = new URL(session.redirectUri);
-    target.searchParams.set('code', ticket);
-    target.searchParams.set('state', session.clientState);
-    return res.redirect(
-      this.statusRedirectUrl('registration_continue', target.toString()),
-      303,
-    );
-  }
-
-  // Deliberately no public /challenge/confirm route. An earlier draft of
-  // this file exposed one that took redirect_uri straight from a query
-  // param with no validation against the client's registered URIs — an
-  // open-redirect-plus-code-injection bug (the redirect target and the
-  // authorization code would both be attacker-directed). Phase B's flow
-  // never needs a standalone confirm step — the callback above calls
-  // confirmInternal() directly, using ONLY the redirect_uri and
-  // clientState from the server-side session that /authorize already
-  // validated against the client registry. If Phase D ever needs a real
-  // multi-step challenge (e.g. a manual code entry screen between Google
-  // auth and confirmation), add it as a POST bound to that same signed
-  // session — never a bare GET trusting caller-supplied redirect state.
-
-  private async confirmInternal(
-    challengeId: string,
-    redirectUri: string,
-    clientState: string,
-    res: FastifyReply,
-    successState: string,
-  ) {
-    const record = await this.challenges.getChallenge(challengeId);
-    if (!record || record.used || !record.kisUserId || !record.authIdentityId) {
-      throw new BadRequestException(GENERIC_ERROR);
-    }
-    if (record.attemptCount >= record.maxAttempts) {
-      throw new BadRequestException(GENERIC_ERROR);
-    }
-
-    await this.challenges.markChallengeUsed(challengeId);
-    const authCode = await this.challenges.issueAuthorizationCode(
-      {
-        purpose: record.purpose,
-        clientId: record.clientId,
-        kisUserId: record.kisUserId,
-        authIdentityId: record.authIdentityId,
-        redirectUri,
-      },
-      loadConfig().authCodeTtlSeconds,
-    );
-
-    const target = new URL(redirectUri);
-    target.searchParams.set('code', authCode);
-    target.searchParams.set('state', clientState);
-    return res.redirect(this.statusRedirectUrl(successState, target.toString()), 303);
   }
 }
