@@ -46,6 +46,36 @@ export class IdentityService {
     | { ok: true; identity: AuthIdentity }
     | { ok: false; reason: 'already_linked' }
   > {
+    // Checked first, not just inferred from which unique constraint a raw
+    // INSERT violated: if this EXACT (provider, providerSubject) is
+    // already linked to this EXACT kisUserId, this is a retry of an
+    // already-completed link - most commonly because an earlier attempt
+    // got this far (the row below already exists) but never reached the
+    // caller's own confirmation step (e.g. the final redirect back to the
+    // client failed after this had already succeeded). Treating that as
+    // `already_linked` permanently strands the one account that could
+    // ever legitimately retry this specific pair, since every future
+    // attempt would hit the exact same unique-constraint conflict
+    // forever. A DIFFERENT kisUserId for the same identity is still a
+    // real conflict, unchanged below.
+    const existing = await this.findByProviderSubject(
+      args.provider,
+      args.providerSubject,
+    );
+    if (existing) {
+      if (existing.kisUserId !== args.kisUserId) {
+        return { ok: false, reason: 'already_linked' };
+      }
+      const { rows } = await this.pool.query(
+        `UPDATE auth_identity
+         SET provider_email = $1, provider_email_verified = $2, last_authenticated_at = now()
+         WHERE id = $3
+         RETURNING id, provider, provider_subject, kis_user_id, provider_email, provider_email_verified, status`,
+        [args.providerEmail, args.providerEmailVerified, existing.id],
+      );
+      return { ok: true, identity: this.mapRow(rows[0]) };
+    }
+
     try {
       const { rows } = await this.pool.query(
         `INSERT INTO auth_identity (provider, provider_subject, kis_user_id, provider_email, provider_email_verified, last_authenticated_at)
@@ -61,7 +91,11 @@ export class IdentityService {
       );
       return { ok: true, identity: this.mapRow(rows[0]) };
     } catch (err: any) {
-      // Postgres unique_violation
+      // Postgres unique_violation — the remaining race window between the
+      // SELECT above and this INSERT (two concurrent first-time link
+      // attempts for the same pair), or the kis_user_id uniqueness
+      // constraint (this KIS account already has a DIFFERENT identity
+      // linked). Either way, correct to report as already_linked.
       if (err?.code === '23505') {
         return { ok: false, reason: 'already_linked' };
       }

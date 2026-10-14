@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
-import { IdentityService } from './identity.service';
+import { IdentityService, AuthIdentity } from './identity.service';
 import { getTestPool, truncateAll } from '../../test/db-test-helper';
 
 const pool: Pool | null = getTestPool();
@@ -61,6 +61,41 @@ describeIfDb('IdentityService (against real Postgres)', () => {
       providerEmailVerified: true,
     });
     expect(second).toEqual({ ok: false, reason: 'already_linked' });
+  });
+
+  it('re-linking the same (provider, subject) to the SAME kisUserId succeeds idempotently', async () => {
+    // Covers a real production scenario: an earlier link attempt reached
+    // this far (the row exists) but the caller never learned about it
+    // (e.g. a broken final redirect) — retrying must succeed again, not
+    // permanently report already_linked for the only account that could
+    // ever legitimately retry this exact pair.
+    const kisUserId = randomUUID();
+    const first = await service.link({
+      provider: 'google',
+      providerSubject: 'retry-sub',
+      kisUserId,
+      providerEmail: 'old@example.com',
+      providerEmailVerified: false,
+    });
+    expect(first.ok).toBe(true);
+
+    const second = await service.link({
+      provider: 'google',
+      providerSubject: 'retry-sub',
+      kisUserId,
+      providerEmail: 'new@example.com',
+      providerEmailVerified: true,
+    });
+    expect(second.ok).toBe(true);
+    if (second.ok) {
+      expect(second.identity.id).toBe((first as { ok: true; identity: AuthIdentity }).identity.id);
+      expect(second.identity.kisUserId).toBe(kisUserId);
+      expect(second.identity.providerEmail).toBe('new@example.com');
+      expect(second.identity.providerEmailVerified).toBe(true);
+    }
+
+    const found = await service.findByProviderSubject('google', 'retry-sub');
+    expect(found?.kisUserId).toBe(kisUserId);
   });
 
   it('refuses to link a second Google identity to the same KIS account', async () => {
